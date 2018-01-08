@@ -13,7 +13,8 @@ from collections import OrderedDict,Counter
 import numpy as np
 import lda
 import re
-log_file="E:/文本特征提取/谭松波--酒店评论语料/谭松波--酒店评论语料/utf-8/读取数据DEBUG.log"
+import pickle
+log_file="E:/文本特征提取/谭松波--酒店评论语料/谭松波--酒店评论语料/utf-8/jst模型DEBUG.log"
 logger = logging.getLogger("读取数据DEBUG")
 log_level = logging.DEBUG
 handler = logging.FileHandler(log_file)
@@ -22,10 +23,14 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(log_level)
 file_path="E:/文本特征提取/谭松波--酒店评论语料/谭松波--酒店评论语料/utf-8/2000/2000"
+movie_file_path="D:/迅雷下载/review_polarity/txt_sentoken"
 stop_path="E:/文本特征提取/谭松波--酒店评论语料/stopwords.txt"
 wordidmap_file="E:/文本特征提取/谭松波--酒店评论语料/wordidmap_file.txt"
 idwordmap_file="E:/文本特征提取/谭松波--酒店评论语料/idwordmap_file.txt"
-def load_data(path):
+wordidmap_file="E:/文本特征提取/谭松波--酒店评论语料/wordidmap_file.txt"
+idwordmap_file="E:/文本特征提取/谭松波--酒店评论语料/idwordmap_file.txt"
+seed_path="C:/Users/Administrator/Downloads/SentimentAnalysisWordsLib (1)/SentimentAnalysisWordsLib/清华大学李军中文褒贬义词典"
+def load_data(path,sample=False,pos_num=100,neg_num=100):
     dir_list=os.listdir(path)
     pos_path=path+'/'+dir_list[1]
     neg_path=path+'/'+dir_list[0]
@@ -45,6 +50,8 @@ def load_data(path):
         if temp not in pos:
             pos.append(temp)                
         logger.info("%s 正情感已读取完毕"%(i))
+        if sample and len(pos)==pos_num:
+            break
     for i in neg_files:
         temp=[]
         with codecs.open(neg_path+'/'+i,'r','utf-8') as f:
@@ -55,6 +62,9 @@ def load_data(path):
         if temp not in neg:
             neg.append(temp)                
         logger.info("%s 负情感已读取完毕"%(i))
+        if sample and len(neg)==neg_num:
+            break
+    print("共有%d个正面文档，%d个负面文档"%(len(pos),len(neg)))
     return pos,neg
 def fenci(docs,stop_path):
     stop_words=[]
@@ -114,7 +124,7 @@ def preprocess(words_list,word2id_file,id2word_file):
         logger.info(u"序号与词对应关系已保存到%s" % id2word_file)
         return docs
 class JST_model(object):
-    def __init__(self,dpre,seed=1,K=10,S=2,alpha=1,beta=0.01,gamma=1,iterations=1000,topN_words=5):
+    def __init__(self,dpre,seed=1,K=10,S=2,alpha=1,beta=0.01,gamma=[1,1],iterations=1000,topN_words=5):
         '''
         先初始化超参数K（主题数），两个狄利克雷分布的参数alpha，beta
         '''
@@ -123,9 +133,10 @@ class JST_model(object):
         self.K=K
         self.alpha=alpha
         self.beta=beta
-        self.gamma=gamma
+        self.gamma=np.array(gamma)
         self.V=dpre.words_count
         self.S=S
+        assert(len(self.gamma)==self.S)
         self.phi=np.zeros((self.V,self.K,self.S))
         self.theta=np.zeros((self.dpre.docs_count,self.K,self.S))
         self.pai=np.zeros((self.dpre.docs_count,self.S))
@@ -147,8 +158,8 @@ class JST_model(object):
         self.nsdsum = np.zeros((dpre.docs_count,self.S),dtype="int")    #第i篇文档情感j的数量
         self.ndsum = np.zeros(dpre.docs_count,dtype="int")  #每篇文档词数量
         np.random.seed(seed)
-        self.Z = np.array([ [[np.random.randint(0,self.K),np.random.randint(0,self.S)] \
-                         for y in range(dpre.docs[x].length)] for x in range(dpre.docs_count)])        # M*doc.size()，文档中词的主题分布
+        self.initialize_Z(seed_path)
+        # M*doc.size()，文档中词的主题分布
         for doc in range(len(self.Z)):
             for word in range(len(self.Z[doc])):
                 topic_index=self.Z[doc][word][0]
@@ -160,6 +171,27 @@ class JST_model(object):
                 self.nstd[doc][topic_index][sentiment_index]+=1
                 self.nsdsum[doc][sentiment_index]+=1
                 self.ndsum[doc]+=1
+    def initialize_Z(self,seed_path):
+        dir_list=os.listdir(seed_path)
+        neg_seed=[]
+        pos_seed=[]
+        with codecs.open(seed_path+'/'+dir_list[0],'r','utf-8') as f:
+            for line in f.readlines():
+                neg_seed.append(line.strip())
+        with codecs.open(seed_path+'/'+dir_list[1],'r','utf-8') as f:
+            for line in f.readlines():
+                pos_seed.append(line.strip())
+        neg_seed={}.fromkeys(neg_seed)
+        pos_seed={}.fromkeys(pos_seed)
+        self.Z = np.array([ [[np.random.randint(0,self.K),self.initial_S(self.dpre.id2word[self.dpre.docs[x].words[y]],neg_seed,pos_seed)] \
+                         for y in range(self.dpre.docs[x].length)] for x in range(self.dpre.docs_count)])
+    def initial_S(self,word,neg,pos):
+        if word in neg:
+            return 1
+        elif word in pos:
+            return 0
+        else:
+            return np.random.randint(0,self.S)
     def Gibbs_sampling(self):
     #,thetafile,phifile,parafile,topNfile,tassginfile
         for i in range(self.iter):
@@ -174,19 +206,28 @@ class JST_model(object):
                     self.ndsum[m]-=1
                     self.p=(self.nstd[m]+self.alpha)/(self.nsdsum[m]+self.K*self.alpha)\
                        *(self.nstw[word_id]+self.beta)/(self.nstwsum+self.V*self.beta)\
-                       *(self.nsdsum[m]+self.gamma)/(self.ndsum[m]+self.S*self.gamma)
+                       *(self.nsdsum[m]+self.gamma)/(self.ndsum[m]+np.sum(self.gamma))
                     prob=self.p.flatten()
                     assert(len(prob)==self.K*self.S)
                     for i in range(1,len(prob)):
                         prob[i]+=prob[i-1]
 #                    print(prob[-11])
-                    prob=prob/np.sum(prob)
-                    u=np.random.rand()
+#                    prob=prob/np.sum(prob)
+#                    u=np.random.rand()
+                    u=np.random.uniform(0.0,prob[-1])
                     for senti_top in range(len(prob)):
                         if prob[senti_top]>u:
                             break
-                    new_sentiment=senti_top%self.S
-                    new_topic=senti_top//self.S
+                    if senti_top%self.S:
+                        new_sentiment=senti_top%self.S-1
+                        new_topic=senti_top//self.S
+                    else:
+                        new_sentiment=self.S-1
+                        new_topic=senti_top//self.S-1
+#                    if senti_top//self.S:
+#                        new_topic=senti_top//self.S
+#                    else:
+#                        new_topic=senti_top//self.S-1
                     self.nstw[word_id][new_topic][new_sentiment]+=1
                     self.nstwsum[new_topic][new_sentiment]+=1
                     self.nstd[m][new_topic][new_sentiment]+=1
@@ -248,19 +289,19 @@ def train_test_split(data,seed=2,train_rate=0.8):
     return train,test
     
     
-pos,neg=load_data(file_path)
-#del pos[5039]
-pos_words=fenci(pos,stop_path)
-y_pos=np.ones(len(pos_words))
-neg_words=fenci(neg,stop_path)
-y_neg=-np.ones(len(neg_words))
-y=np.concatenate((y_pos,y_neg),axis=0)
-y=y.reshape((-1,1))
-pos_words.extend(neg_words)
-total_words=pos_words
-total_matrix,vacabulary=list2matrix(total_words)
-
-data_all=np.concatenate((total_matrix,y),axis=1)
+#pos,neg=load_data(file_path)
+##del pos[5039]
+#pos_words=fenci(pos,stop_path)
+#y_pos=np.ones(len(pos_words))
+#neg_words=fenci(neg,stop_path)
+#y_neg=-np.ones(len(neg_words))
+#y=np.concatenate((y_pos,y_neg),axis=0)
+#y=y.reshape((-1,1))
+#pos_words.extend(neg_words)
+#total_words=pos_words
+#total_matrix,vacabulary=list2matrix(total_words)
+#
+#data_all=np.concatenate((total_matrix,y),axis=1)
 def train_with_lda(data_matrix,split=False,topic_num=5,alpha=0.1,beta=0.01,iterations=1000):
     if split:
         train,test=train_test_split(data_matrix)
@@ -289,7 +330,7 @@ def lda_once(data,topic_num,alpha=0.1,beta=0.01,iterations=1000):
 def show_topic_words(vacabulary,topic_word,topN=10):
     topN_words=[]
     V=np.array(vacabulary)
-    for i in topic_word.T:
+    for i in topic_word:
         index=list(reversed(np.argsort(i)[-topN:]))
         topN_words.append(V[index])
     return topN_words
@@ -299,8 +340,15 @@ def search_word(word,words_list):
         if word in words_list[i]:
             index.append(i)
     return index
-doc_topic,topic_word=lda_once(data_all[:,:-1],5)
-topN=show_topic_words(vacabulary,topic_word,20)
+def Sentiment_seed(sentiment_path):
+    senti_seed=[]
+    with codecs.open(sentiment_path,'r','utf-8') as f:
+        for line in f.readlines():
+            senti_seed.append(line.strip())
+    return {}.fromkeys(senti_seed)
+ 
+#doc_topic,topic_word=lda_once(data_all[:,:-1],5)
+#topN=show_topic_words(vacabulary,topic_word,20)
 
 #clf=RandomForestClassifier(100)
 #clf.fit(doc_topic,y)
@@ -308,4 +356,42 @@ topN=show_topic_words(vacabulary,topic_word,20)
 #    t1,t2=train_test_split(data_all,seed=i)
 #    if np.sum(t1,axis=0).min()>0 and np.sum(t1,axis=1).min()>0:
 #        print(i)
-phi[1][2][:5]
+#a=preprocess(total_words,wordidmap_file,idwordmap_file)
+#jst=JST_model(a,iterations=1000,S=2)
+#jst.Gibbs_sampling()
+#theta,phi,pai=jst.theta,jst.phi,jst.pai
+#with open("E:/硕士毕业论文/jst_with2S.pkl",'wb') as f:
+#    pickle.dump(jst,f)
+def jst_showtopN_words(id2word,phi_matrix,topN):
+    topwords_list=[]
+    for i in range(phi_matrix.shape[1]):
+        temp=[]
+        for j in range(phi_matrix.shape[2]):
+            keys=np.argsort(phi_matrix[:,i,j])[-topN:]
+            words=list(map(id2word.get,keys))
+            temp.append(words)
+        topwords_list.append(temp)
+    return topwords_list
+def lookintofiles(filepath,stoppath):
+    pos,neg=load_data(filepath)
+    pos_words=fenci(pos,stoppath)
+    neg_words=fenci(neg,stoppath)
+    pos_words.extend(neg_words)
+#    total_words=pos_words
+    return pos,neg,pos_words,neg_words 
+
+def main(i):    
+    pos,neg=load_data(file_path)
+    pos_words=fenci(pos,stop_path)
+    neg_words=fenci(neg,stop_path)
+    pos_words.extend(neg_words)
+    total_words=pos_words
+    a=preprocess(total_words,wordidmap_file,idwordmap_file)
+    jst=JST_model(a,K=30,alpha=50/30,iterations=1000,gamma=[0.01,0.9],S=2)
+    jst.Gibbs_sampling()
+    top=jst_showtopN_words(a.id2word,jst.phi,10)
+    with open("E:/硕士毕业论文/jst_with"+str(jst.S)+"S第"+str(i)+"次实验数据为"+file_path[-4:]+'共'+str(len(pos)+len(neg))+"篇文档.pkl",'wb') as f:
+        pickle.dump(jst,f)
+    return jst,jst.theta,jst.phi,jst.pai,top
+jst,theta,phi,pai,top=main(16)
+#pos,neg,pos_words,neg_words=lookintofiles(file_path,stop_path)
