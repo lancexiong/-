@@ -14,7 +14,8 @@ import numpy as np
 import lda
 import re
 import pickle
-from functools import reduce
+import time
+import matplotlib.pyplot as plt
 log_file="E:/文本特征提取/谭松波--酒店评论语料/谭松波--酒店评论语料/utf-8/jst模型DEBUG.log"
 logger = logging.getLogger("读取数据DEBUG")
 log_level = logging.DEBUG
@@ -68,7 +69,7 @@ def load_data(path,sample=False,pos_num=100,neg_num=100):
         if sample and len(neg)==neg_num:
             break
     print("共有%d个正面文档，%d个负面文档"%(len(pos),len(neg)))
-    return pos,neg
+    return pos,neg,len(pos),len(neg)
 def fenci(docs,stop_path,freq=0):
     stop_words=[]
     words=[]
@@ -213,6 +214,7 @@ class JST_model(object):
             return np.random.randint(0,self.S)
     def Gibbs_sampling(self):
     #,thetafile,phifile,parafile,topNfile,tassginfile
+        print("训练开始")
         for i in range(self.iter):
             for m in range(self.dpre.docs_count):
                 for word in range(len(self.Z[m])):
@@ -237,12 +239,11 @@ class JST_model(object):
                     for senti_top in range(len(prob)):
                         if prob[senti_top]>u:
                             break
-                    if senti_top%self.S:
-                        new_sentiment=senti_top%self.S-1
-                        new_topic=senti_top//self.S
-                    else:
-                        new_sentiment=self.S-1
-                        new_topic=senti_top//self.S-1
+                  
+                    new_sentiment=senti_top%self.S
+                    new_topic=senti_top//self.S
+                   
+                    
 #                    if senti_top//self.S:
 #                        new_topic=senti_top//self.S
 #                    else:
@@ -254,6 +255,7 @@ class JST_model(object):
                     self.ndsum[m]+=1
                     self.Z[m][word]=[new_topic,new_sentiment]
         logger.info(u"迭代完成。")
+        print("训练结束")
         
         logger.debug(u"计算文章-主题分布")
         self._theta()
@@ -398,14 +400,14 @@ def combine(corpus):
     return temp
 def load_sentence(data_path,sample=False,pos_num=100,neg_num=100):
     if sample:
-        pos,neg=load_data(data_path,sample,pos_num,neg_num)
+        pos,neg,pos_num,neg_num=load_data(data_path,sample,pos_num,neg_num)
     else:
-        pos,neg=load_data(data_path)
+        pos,neg,pos_num,neg_num=load_data(data_path)
     corpus=pos+neg
     corpus_sentence=[]
     for review in corpus:
         corpus_sentence.append(list(map(cut_sentence,review)))
-    return corpus_sentence
+    return corpus_sentence,pos_num,neg_num
             
     return corpus_sentence
 def filter_words(words_list,freq=0):
@@ -478,21 +480,21 @@ def preprocess2(words_list,word2id_file,id2word_file):
         logger.info(u"序号与词对应关系已保存到%s" % id2word_file)
         return docs
 def factor(a,delta):
-    v=a.copy()
-    for j in range(1,delta):
-        v*=(v+1)
-    return v
+    temp=1
+    for j in range(delta):
+        temp*=(a+j)
+    return temp
  
 def factor_vectorize(vector,delta_list):
-    v=vector.copy()
-    for i in range(v.shape[-1]):
-        for j in range(1,delta_list[i]):
-            v[:,:,i]*=(v[:,:,i]+1)
-    return v
+    temp=np.ones(vector.shape)
+    for i in range(vector.shape[-1]):
+        for j in range(delta_list[i]):
+            temp[:,:,i]*=(vector[:,:,i]+j)
+    return temp
     
 #    return list(map(factor,vector[:,:],delta_list))
 class ASUM_model():
-    def __init__(self,dpre,K=5,S=2,seed=1,iterations=1000,alpha=1,beta=0.01,gamma=1):
+    def __init__(self,dpre,initialize=True,K=5,S=2,seed=1,iterations=1000,alpha=1,beta=0.01,gamma=1):
         self.dpre=dpre
         self.K=K
         self.S=S
@@ -505,17 +507,17 @@ class ASUM_model():
         self.theta=np.zeros((self.dpre.docs_count,self.K,self.S))
         self.pai=np.zeros((self.dpre.docs_count,self.S))
         self.p=np.zeros((self.K,self.S))
-#        self.p_sentiment=np.zeros(self.S)
-        self.nstw = np.zeros((self.K,self.S,self.V),dtype="int")#词i被分配到情感j,主题k的数量    
-        self.nstwsum = np.zeros((self.K,self.S),dtype="int")    #被分配到情感j，主题k的词数量
-        
-        self.nstd = np.zeros((dpre.docs_count,self.K,self.S),dtype="int")  #第i篇文档中被分配到情感j，主题k的词数量     
-        self.nsdsum = np.zeros((dpre.docs_count,self.S),dtype="int")    #每篇文档的不同情感句子数量
+        self.nstw = np.zeros((self.K,self.S,self.V),dtype="float")#词i被分配到情感j,主题k的数量    
+        self.nstwsum = np.zeros((self.K,self.S),dtype="float")    #被分配到情感j，主题k的词数量
+        self.nstd = np.zeros((dpre.docs_count,self.K,self.S),dtype="float")  #第i篇文档中被分配到情感j，主题k的词数量     
+        self.nsdsum = np.zeros((dpre.docs_count,self.S),dtype="float")    #每篇文档的不同情感句子数量
         self.nstdsum=np.zeros((self.dpre.docs_count,self.K,self.S))
-        self.ndsum = np.zeros(dpre.docs_count,dtype="int")  #每篇文档句子数量
-        self.prob=0
+        self.ndsum = np.zeros(dpre.docs_count,dtype="float")  #每篇文档句子数量
         np.random.seed(seed)
-        self.Z = np.array([ [[np.random.randint(0,self.K),np.random.randint(0,self.S),self.dpre.docs[x].words[y]] \
+        if initialize:
+            self.initialize_Z(seed_path)
+        else:
+            self.Z = np.array([ [[np.random.randint(0,self.K),np.random.randint(0,self.S),self.dpre.docs[x].words[y]] \
                          for y in range(self.dpre.docs[x].sentence)] for x in range(self.dpre.docs_count)]) 
         for doc in range(len(self.Z)):
             for sentence in range(len(self.Z[doc])):
@@ -546,16 +548,10 @@ class ASUM_model():
                     self.nstwsum[topic][sentiment]-=words_num
                     self.nsdsum[m][sentiment]-=1
                     self.ndsum[m]-=1
-                    
-#                    self.p=(self.nstd[m]+self.alpha)/(self.nsdsum[m]+self.K*self.alpha)\
-#                       *np.prod(gamma((self.nstw[:,:,words_id]+self.beta+words_count)),axis=2)/np.prod(gamma(self.nstw[:,:,words_id]+self.beta),axis=2)\
-#                       /(self.nstwsum+self.V*self.beta+words_num)\
-#                       *(self.nsdsum[m]+self.gamma)/(self.ndsum[m]+self.gamma*self.S)
                     self.p=(self.nstd[m]+self.alpha)/(self.nsdsum[m]+self.K*self.alpha)\
                        *np.prod(factor_vectorize(self.nstw[:,:,words_id]+self.beta,words_count),2)/factor(self.nstwsum+self.V*self.beta,words_num)\
                        *(self.nsdsum[m]+self.gamma)/(self.ndsum[m]+self.gamma*self.S)
                     prob=self.p.flatten()
-                    self.prob=prob
                     assert(len(prob)==self.K*self.S)
                     assert((prob>0).all() and (prob!=np.inf).any())
                     for i in range(1,len(prob)):
@@ -565,12 +561,8 @@ class ASUM_model():
                     for senti_top in range(len(prob)):
                         if prob[senti_top]>u:
                             break
-                    if senti_top%self.S:
-                        new_sentiment=senti_top%self.S-1
-                        new_topic=senti_top//self.S
-                    else:
-                        new_sentiment=self.S-1
-                        new_topic=senti_top//self.S-1
+                    new_sentiment=senti_top%self.S
+                    new_topic=senti_top//self.S
 #                    if senti_top//self.S:
 #                        new_topic=senti_top//self.S
 #                    else:
@@ -599,6 +591,36 @@ class ASUM_model():
     def _pai(self):
         for i in range(self.dpre.docs_count):
             self.pai[i]=(self.nsdsum[i]+self.gamma)/(self.ndsum[i]+self.S*self.gamma)
+    def initialize_Z(self,seed_path):
+        dir_list=os.listdir(seed_path)
+        neg_seed=[]
+        pos_seed=[]
+        with codecs.open(seed_path+'/'+dir_list[0],'r','utf-8') as f:
+            for line in f.readlines():
+                neg_seed.append(line.strip())
+        with codecs.open(seed_path+'/'+dir_list[1],'r','utf-8') as f:
+            for line in f.readlines():
+                pos_seed.append(line.strip())
+        neg_seed={}.fromkeys(neg_seed)
+        pos_seed={}.fromkeys(pos_seed)
+        self.Z = np.array([ [[np.random.randint(0,self.K),self.initial_S(self.dpre.docs[x].words[y],neg_seed,pos_seed),self.dpre.docs[x].words[y]] \
+                         for y in range(self.dpre.docs[x].sentence)] for x in range(self.dpre.docs_count)])
+        
+    def initial_S(self,wordsid_list,neg,pos):
+        pos_num=0
+        neg_num=0
+        words_list=map(self.dpre.id2word.get,wordsid_list)
+        for word in words_list:
+            if word in neg:
+                neg_num+=1
+            elif word in pos:
+                pos_num+=1
+        if pos_num>neg_num:
+            return 0
+        elif neg_num>pos_num:
+            return 1
+        else:
+            return np.random.randint(0,self.S)
     #doc_topic,topic_word=lda_once(data_all[:,:-1],5)
 #topN=show_topic_words(vacabulary,topic_word,20)
 
@@ -635,14 +657,9 @@ def lookintofiles(filepath,stoppath):
   
 def main():
     topwords_path="E:/文本特征提取/谭松波--酒店评论语料/top_words.txt"
-    pos,neg=load_data(file_path,True,10,10)
+    pos,neg,pos_num,neg_num=load_data(file_path,True,10,10)
     corpus=pos+neg
     corpus_words=fenci(corpus,stop_path,5)
-    corpus_words=filter_words(corpus_words,5)
-#    pos_words=fenci(pos,stop_path)
-#    neg_words=fenci(neg,stop_path)
-#    pos_words.extend(neg_words)
-#    total_words=pos_words
     a=preprocess(corpus_words,wordidmap_file,idwordmap_file)
     result_pai=[]
     result_phi=[]
@@ -654,6 +671,7 @@ def main():
         jst.Gibbs_sampling()
         print("主题数为%d训练完毕"%(i))            
         top=showtopN_words(a.id2word,jst.phi,10)
+        calculate_accuracy(jst.pai,pos_num,neg_num)
         with codecs.open(topwords_path,'a','utf-8') as f:
             f.write("===================================================\n")
             f.write("主题数为%d\n" %i)
@@ -678,20 +696,116 @@ def main():
 #jst,theta,phi,pai,top=main(17)
 #theta,phi,pai,top=main()
 #pos,neg,pos_words,neg_words=lookintofiles(file_path,stop_path)
-def main_asum():
-    corpus_sentence=load_sentence(file_path)
+def calculate_accuracy(predict_pai,pos_num,neg_num):
+    result_pred=predict_pai[:,0]>predict_pai[:,1]
+    pos_accuracy=sum(result_pred[:pos_num])/pos_num
+    neg_accuracy=1-sum(result_pred[pos_num:])/neg_num
+    print("正类预测准确率为%f\n"%pos_accuracy)
+    print("负类预测准确率为%f\n"%neg_accuracy)
+    accuracy=(sum(result_pred[:pos_num])+neg_num-sum(result_pred[pos_num:]))/(pos_num+neg_num)
+    return accuracy
+def parameter_tune(dpre,pos_num,neg_num,model_type="JST"):
+    K_list=[1,5,8,10,15,20,30,50,60]
+#    K_list=[1,5,8,10]
+    time_consume=[]
+    accuracy=[]
+    for k in K_list:
+        if model_type=="ASUM":
+            print("ASUM模型")
+            asum=ASUM_model(dpre,K=k,alpha=50/k)
+            start=time.clock()
+            asum.Gibbs_sampling()
+            end=time.clock()
+            time_consume.append(end-start)
+            print("本次训练所花时间%f"%(end-start))
+            pai=asum.pai
+            print("主题数为：%d"%k)
+            accuracy.append(calculate_accuracy(pai,pos_num,neg_num))
+        elif model_type=="JST":
+            print("JST模型")
+            jst=JST_model(dpre,K=k,alpha=50/k)
+            start=time.clock()
+            jst.Gibbs_sampling()
+            end=time.clock()
+            time_consume.append(end-start)
+            print("本次训练所花时间%f"%(end-start))
+            pai=jst.pai
+            print("主题数为：%d"%k)
+            accuracy.append(calculate_accuracy(pai,pos_num,neg_num))
+        else:
+            raise ValueError("模型不存在")
+    plt.subplot(211)
+    plot_time(K_list,time_consume)
+    plt.tight_layout(3)
+    plt.subplot(212)
+    plot_accuracy(K_list,accuracy)
+def plot_time(x,y):
+    plt.rcParams['font.sans-serif']=['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.ylabel(u"训练所花费时间")
+    plt.xlabel(u"主题数目")
+    plt.title(u"训练主题时间图")
+    plt.plot(x,y)
+def plot_accuracy(topic_num,accuracy):
+    plt.rcParams['font.sans-serif']=['SimHei']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.ylabel("准确率")
+    plt.xlabel(u"主题数目")
+    plt.title(u"主题数目-准确率图")
+    plt.plot(topic_num,accuracy)
+def main_asum(tune=False):
+    corpus_sentence,pos_num,neg_num=load_sentence(file_path)
     corpus_sentence=combine(corpus_sentence)
     corpus_words=list(map(fenci_paragraph,corpus_sentence))
-    corpus_words=filter_words(corpus_words,10)
+    corpus_words=filter_words(corpus_words,3)
     a=preprocess2(corpus_words,word2idmap_sentence,id2wordmap_sentence)
-    asum=ASUM_model(a,20,alpha=50/20)
-    asum.Gibbs_sampling()
-    top=showtopN_words(a.id2word,asum.phi,15)
-    theta,pai=asum.theta,asum.pai
-    return top,theta,pai
-top,theta,pai=main_asum()    
+    if tune:
+        parameter_tune(a,pos_num,neg_num,"ASUM")
+    else:
+        asum=ASUM_model(a,K=20,alpha=1,beta=0.01,gamma=1)
+        asum.Gibbs_sampling()
+        top=showtopN_words(a.id2word,asum.phi,15)
+        theta,pai=asum.theta,asum.pai
+        accuracy=calculate_accuracy(pai,pos_num,neg_num)  #计算正负两类概率
+        return theta,pai,top,accuracy
+        
+#    return top,theta,pai
+#top,theta,pai=main_asum()
+#main_asum(True)
+def write_topNwords(topN_words,filepath):
+    with codecs.open(filepath,'w',"utf-8") as f:
+        for i in range(len(topN_words)):
+            f.write("主题%d：\n"%i)
+            for l in range(len(topN_words[i])):
+                f.write("情感%d"%l)
+                for word in topN_words[i][l]:
+                    f.write(word+"\t")
+                f.write("\n")
+                
+def caculate_phi_distance(phi):
+                    
+        
+                   
 def sum_of(List):
     '''
     统计有多少个词语
     '''
-    return sum(map(len,List))     
+    return sum(map(len,List))    
+def main_jst(tune=False):
+    pos,neg,pos_num,neg_num=load_data(file_path)
+    corpus=pos+neg
+    corpus_words=fenci(corpus,stop_path,5)
+    a=preprocess(corpus_words,wordidmap_file,idwordmap_file)
+    topN_file=r"E:/文本特征提取//topwords_jst.txt"
+    
+    if tune:
+        parameter_tune(a,pos_num,neg_num,"JST")
+    else:
+        jst=JST_model(a,K=20,alpha=50/20,beta=0.01)
+        jst.Gibbs_sampling()
+        top=showtopN_words(a.id2word,jst.phi,15)
+        write_topNwords(top,topN_file)
+        theta,pai,phi=jst.theta,jst.pai,jst.phi
+        accuracy=calculate_accuracy(pai,pos_num,neg_num)  #计算正负两类概率
+        return theta,pai,phi,top,accuracy
+theta,pai,phi,top,accuracy=main_jst()
