@@ -408,8 +408,7 @@ def load_sentence(data_path,sample=False,pos_num=100,neg_num=100):
     for review in corpus:
         corpus_sentence.append(list(map(cut_sentence,review)))
     return corpus_sentence,pos_num,neg_num
-            
-    return corpus_sentence
+
 def filter_words(words_list,freq=0):
     word_dict={}
     temp=sum(sum(words_list,[]),[])
@@ -604,7 +603,7 @@ class ASUM_model():
         neg_seed={}.fromkeys(neg_seed)
         pos_seed={}.fromkeys(pos_seed)
         self.Z = np.array([ [[np.random.randint(0,self.K),self.initial_S(self.dpre.docs[x].words[y],neg_seed,pos_seed),self.dpre.docs[x].words[y]] \
-                         for y in range(self.dpre.docs[x].sentence)] for x in range(self.dpre.docs_count)])
+                         for y in range(self.dpre.docs[x].sentence)] for x in range(self.dpre.docs_count)],dtype=object)
         
     def initial_S(self,wordsid_list,neg,pos):
         pos_num=0
@@ -706,9 +705,9 @@ def calculate_accuracy(predict_pai,pos_num,neg_num):
     return accuracy
 def parameter_tune(dpre,pos_num,neg_num,model_type="JST"):
     K_list=[1,5,8,10,15,20,30,50,60]
-#    K_list=[1,5,8,10]
     time_consume=[]
     accuracy=[]
+    dist=[]
     for k in K_list:
         if model_type=="ASUM":
             print("ASUM模型")
@@ -721,6 +720,9 @@ def parameter_tune(dpre,pos_num,neg_num,model_type="JST"):
             pai=asum.pai
             print("主题数为：%d"%k)
             accuracy.append(calculate_accuracy(pai,pos_num,neg_num))
+            phi=asum.phi
+            distance=calculate_phi_distance(phi)
+            dist.append(distance)
         elif model_type=="JST":
             print("JST模型")
             jst=JST_model(dpre,K=k,alpha=50/k)
@@ -732,6 +734,9 @@ def parameter_tune(dpre,pos_num,neg_num,model_type="JST"):
             pai=jst.pai
             print("主题数为：%d"%k)
             accuracy.append(calculate_accuracy(pai,pos_num,neg_num))
+            phi=jst.phi
+            distance=calculate_phi_distance(phi)
+            dist.append(distance)
         else:
             raise ValueError("模型不存在")
     plt.subplot(211)
@@ -739,6 +744,7 @@ def parameter_tune(dpre,pos_num,neg_num,model_type="JST"):
     plt.tight_layout(3)
     plt.subplot(212)
     plot_accuracy(K_list,accuracy)
+    return dist
 def plot_time(x,y):
     plt.rcParams['font.sans-serif']=['SimHei']
     plt.rcParams['axes.unicode_minus'] = False
@@ -753,25 +759,25 @@ def plot_accuracy(topic_num,accuracy):
     plt.xlabel(u"主题数目")
     plt.title(u"主题数目-准确率图")
     plt.plot(topic_num,accuracy)
-def main_asum(tune=False):
+def main_asum(tune=False,distance=False):
     corpus_sentence,pos_num,neg_num=load_sentence(file_path)
     corpus_sentence=combine(corpus_sentence)
     corpus_words=list(map(fenci_paragraph,corpus_sentence))
     corpus_words=filter_words(corpus_words,3)
     a=preprocess2(corpus_words,word2idmap_sentence,id2wordmap_sentence)
     if tune:
-        parameter_tune(a,pos_num,neg_num,"ASUM")
+        return parameter_tune(a,pos_num,neg_num,"ASUM")
     else:
         asum=ASUM_model(a,K=20,alpha=1,beta=0.01,gamma=1)
         asum.Gibbs_sampling()
         top=showtopN_words(a.id2word,asum.phi,15)
-        theta,pai=asum.theta,asum.pai
+        theta,pai,phi=asum.theta,asum.pai,asum.phi
         accuracy=calculate_accuracy(pai,pos_num,neg_num)  #计算正负两类概率
-        return theta,pai,top,accuracy
+        return theta,pai,phi,top,accuracy
         
 #    return top,theta,pai
-#top,theta,pai=main_asum()
-#main_asum(True)
+#theta,pai,phi,top,accuracy=main_asum()
+dist=main_asum(True)
 def write_topNwords(topN_words,filepath):
     with codecs.open(filepath,'w',"utf-8") as f:
         for i in range(len(topN_words)):
@@ -782,8 +788,19 @@ def write_topNwords(topN_words,filepath):
                     f.write(word+"\t")
                 f.write("\n")
                 
-def caculate_phi_distance(phi):
-                    
+def calculate_phi_distance(phi):
+    '''
+    计算与垃圾主题分布的KL距离
+    '''
+    litter=np.ones(phi.shape[:2])
+    litter/=litter.shape[0]
+    dist=[]
+    for i in range(phi.shape[2]):
+        distance=phi[:,:,i]*np.log(phi[:,:,i]/litter)
+        distance=np.sum(distance)/phi.shape[1]
+        dist.append(distance)  
+    return dist
+    
         
                    
 def sum_of(List):
@@ -794,7 +811,7 @@ def sum_of(List):
 def main_jst(tune=False):
     pos,neg,pos_num,neg_num=load_data(file_path)
     corpus=pos+neg
-    corpus_words=fenci(corpus,stop_path,5)
+    corpus_words=fenci(corpus,stop_path,3)
     a=preprocess(corpus_words,wordidmap_file,idwordmap_file)
     topN_file=r"E:/文本特征提取//topwords_jst.txt"
     
@@ -808,4 +825,110 @@ def main_jst(tune=False):
         theta,pai,phi=jst.theta,jst.pai,jst.phi
         accuracy=calculate_accuracy(pai,pos_num,neg_num)  #计算正负两类概率
         return theta,pai,phi,top,accuracy
-theta,pai,phi,top,accuracy=main_jst()
+#theta,pai,phi,top,accuracy=main_jst()
+def fenci_withtags(docs,stop_path,freq=0):
+    import jieba.posseg as pseg
+    stop_words=[]
+    words=[]
+    tags=[]
+    jieba.load_userdict("E:/文本特征提取/谭松波--酒店评论语料/user_dict.txt")
+    with codecs.open(stop_path,'r','utf-8') as f:
+        for line in f.readlines():    
+            stop_words.append(line.strip())
+    word_dict={}
+    for review in docs:
+        words_temp=[]
+        tags_temp=[]
+        for sentence in review:
+            cut=pseg.cut(sentence.strip())
+            for word,flag in cut:
+                if word not in stop_words and word !=" ":
+                    if word in word_dict:
+                        word_dict[word]+=1
+                    else:
+                        word_dict[word]=1
+                    words_temp.append(word)
+                tags_temp.append(flag)
+        if len(words_temp)>0:
+            words.append(words_temp)
+        tags.append(tags_temp)
+    count=Counter(word_dict).most_common()
+    words_save={}.fromkeys([word for word,num in count if num>=freq])
+    words_remain=[]
+    tags_remain=[]
+    for review_id in range(len(words)):
+        words_temp=[]
+        tags_temp=[]
+        for word_num in range(len(words[review_id])):
+            if words[review_id][word_num] in words_save:
+                words_temp.append(words[review_id][word_num])
+                tags_temp.append(tags[review_id][word_num])
+        if len(words_temp)>0 and len(tags_temp)>0:
+            words_remain.append(words_temp)
+            tags_remain.append(tags_temp)
+    tags_group=list(map(tag_groups,tags_remain))
+    return words_remain,tags_remain,tags_group
+
+def tag_groups(tags_list):
+    tag_group=[]
+    for tag in tags_list:
+        if tag[0]=='a':
+            tag_group.append(0)
+        elif tag[0]=='d':
+            tag_group.append(1)
+        elif tag[0]=='n':
+            tag_group.append(2)
+        elif tag[0]=='v':
+            tag_group.append(3)
+        else:
+            tag_group.append(4)
+    return tag_group
+class Article3(object):
+    def __init__(self):
+        self.words=[]
+        self.tags=[]
+        self.length=0
+class Documents3(object):
+    def __init__(self):
+        self.docs_count =0
+        self.words_count =0
+        self.docs = []
+        self.word2id = OrderedDict()
+        self.id2word=OrderedDict()
+    def cachewordidmap(self,word2id_file,id2word_file):
+        with codecs.open(word2id_file, 'w','utf-8') as f:
+            for word,word_id in self.word2id.items():
+                f.write(word +"\t"+str(id)+"\n")
+        with codecs.open(id2word_file, 'w','utf-8') as f:
+            for word_id,word in self.id2word.items():
+                f.write(str(word_id) +"\t"+word+"\n")
+def preprocess3(words_list,tags_list,word2id_file,id2word_file):
+        docs=Documents3()
+        words_idx=0
+        for review_num in range(len(words_list)):
+            temp=words_list[review_num]
+            tags_temp=tags_list[review_num]
+            article=Article3()
+            for word_num in range(len(temp)):
+                if temp[word_num] in docs.word2id:
+                    article.words.append(docs.word2id[temp[word_num]])
+                else:
+                    docs.word2id[temp[word_num]] = words_idx
+                    docs.id2word[words_idx]=temp[word_num]
+                    article.words.append(words_idx)
+                    words_idx += 1
+                article.tags.append(tags_temp[word_num])
+            article.length=len(temp)
+            docs.docs.append(article)
+        docs.docs_count = len(docs.docs)
+        docs.words_count = len(docs.word2id)
+        logger.info(u"共有%s个文档" % docs.docs_count)
+        docs.cachewordidmap(word2id_file,id2word_file)
+        logger.info(u"词与序号对应关系已保存到%s" % word2id_file)
+        logger.info(u"序号与词对应关系已保存到%s" % id2word_file)
+        return docs
+#class STDP_model(object):
+#    def __init__(self,dpre)
+a,b,e=fenci_withtags(pos,stop_path,2)
+prepre=preprocess3(a,e,wordidmap_file,idwordmap_file)
+c=prepre.docs[2].tags
